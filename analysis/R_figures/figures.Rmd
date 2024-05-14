@@ -1,0 +1,426 @@
+---
+title: "ams"
+author: "Mario"
+date: "2024-03-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# install.packages('pROC')
+# install.packages(c('plotly','tidymodels'))
+# install.packages(c('gridExtra','cowplot'))
+```
+
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(stringr)
+library(pROC)
+library(cowplot)
+library(grid)
+```
+
+## Carga datos
+
+```{r}
+data <- read_csv('all_data.csv')
+head(data)
+```
+
+
+
+```{r}
+preddata <- data %>% 
+  select(!c(PolyPhen,FATHMM_score,CADD_phred,CADD_RAW,CADD_pred,SIFT4G_score,
+            Polyphen2_HDIV_score,CADD_RAW,REVEL_pred)) %>%
+  mutate(Class = factor(Class,labels=c('benign','VUS','pathogenic')),
+         FATHMM_scaled = 1 - FATHMM_scaled) %>% 
+  drop_na(Class) 
+head(preddata)
+```
+```{r}
+summary(data$MutationTaster_score)
+```
+
+
+```{r}
+preddata %>% filter(Class != 'VUS') %>% ggplot() + 
+  # geom_point(aes(am_pathogenicity,REVEL_score)) + 
+  geom_point(aes(am_pathogenicity,MetaRNN_score,color=Freq))
+
+```
+
+## Datos a representar
+
+```{r}
+plotdata <- preddata %>% 
+  pivot_longer(!c(CHROM,Class,POS,REF,ALT,Freq,Gene,protein_variant,am_class,MAX_AF,gnomADv4_AF),names_to="predictor") %>%
+    drop_na(value) %>%
+    mutate(predictor = str_extract(predictor,"(.+)_",group = 1),
+         predictor = ifelse(predictor == 'am','AlphaMissense',predictor))
+plotdata
+```
+## Exploración
+
+Número de observaciones por clase
+
+```{r}
+summdata <- plotdata %>% 
+   filter(Class != 'VUS') %>%
+  group_by(Class,predictor) %>%
+  summarise(n = n(),
+            mean = mean(value)) 
+summdata
+```
+
+```{r,fig.height=10,fig.width=15}
+rocdata <- plotdata %>% 
+  select(Class, predictor, value) %>%
+  filter(Class != 'VUS')
+```
+
+### distribución de los datos
+
+```{r,fig.height=6,fig.width=10}
+ggplot(rocdata,aes(value,color = Class)) + 
+  geom_freqpoly(stat = 'bin') +
+  theme_minimal() + 
+  xlim(0,1.1) +
+  ylim(0,150) +
+  facet_wrap(~predictor) +
+  theme_classic()
+```
+
+```{r}
+violin <- ggplot(rocdata,aes(value,Class,color=Class)) + 
+  geom_violin() +
+  geom_text(data=summdata ,aes(x = ifelse(mean > 0.1 & mean < 0.9,mean,ifelse(mean < 0.9,0.1,0.9)) , y = Class, label=n),size=3,color='black') +
+  facet_wrap(~predictor) +
+  theme_classic() +
+  scale_x_continuous(breaks = c(0,0.5,1),labels = c(0,0.5,1)) +
+  theme(legend.position = 'none')
+violin
+```
+
+```{r,fig.width=10,fig.height=6}
+ggsave('../out/predicviolin.png',width=10,height=6,dpi=700)
+```
+
+## Comparar clasificadores
+
+Gráfico de puntos
+```{r}
+rocdata
+```
+
+
+Usando sus propios thresholds
+
+```{r}
+classdata <- data %>%
+  mutate(Class = factor(Class,labels=c('benign','VUS','pathogenic')),
+         MetaRNN_class = factor(ifelse(MetaRNN_score > 0.5,'likely_pathogenic','likely_benign')),
+         MetaLR_class = factor(ifelse(MetaLR_score > 0.5, 'likely_pathogenic','likely_benign')),
+         # MutPred_class = factor(ifelse(MutPred_score > 0.611,'likely_pathogenic','likely_benign')),
+         REVEL_class = factor(REVEL_pred),
+         AlphaMissense_class = factor(am_class)) %>%
+  select(MetaRNN_class,MetaLR_class,Class,AlphaMissense_class,
+         # MutPred_class,
+         REVEL_class)
+head(classdata)
+```
+```{r}
+class.wo.vus.data <- classdata %>% 
+  filter(Class != 'VUS')
+```
+```{r}
+class.wo.vus.data
+```
+
+
+
+```{r}
+class.wo.vus.data %>% 
+  pivot_longer(!Class,names_to = "predictor",values_to="pred_class") %>% 
+  drop_na() %>%
+  filter(pred_class != "ambiguous") %>%
+  ggplot(aes(Class,pred_class,color=predictor)) + 
+  geom_count() +
+  # geom_text()
+  facet_wrap(.~predictor,scales="free_x")
+```
+
+```{r}
+groupmetarnn <- class.wo.vus.data %>% 
+  select(!Class) %>%
+  pivot_longer(!MetaRNN_class,names_to = "predictor",values_to="pred_class") %>%
+  group_by(MetaRNN_class,predictor,pred_class) %>%
+  summarise(count = n())
+groupmetarnn
+```
+
+```{r,fig.width=12,fig.height=6}
+groupmetarnn %>% 
+  ggplot(aes(predictor,count,fill=pred_class)) + 
+  geom_col(position='dodge2') + 
+  facet_wrap(.~MetaRNN_class)
+```
+
+
+```{r}
+ggplot(rocdata,aes(value,predictor,color=predictor)) + 
+  geom_boxplot() +
+  geom_text(data=summdata ,aes(x = mean , y = predictor, label=n),size=3,color='black') +
+  facet_wrap(~Class) +
+  theme_classic() +
+  theme(legend.position = 'none')
+```
+
+
+
+```{r}
+ggplot(plotdata,aes(Class,fill = Class)) + 
+  geom_bar() + 
+  theme_classic()
+ggsave('../out/classdist.png')
+```
+
+```{r}
+plotdata %>% 
+  select(predictor,value,Class) %>%
+  filter(predictor %in% c('AlphaMissense','REVEL','MetaRNN','MetaLR')) %>%
+  ggplot(aes(predictor,value,fill=Class)) + geom_boxplot(position = 'dodge2')
+```
+```{r}
+plotdata %>%
+  dplyr::group_by(CHROM, POS, REF, ALT, Class, Freq, Gene, protein_variant, am_class, MAX_AF, gnomADv4_AF, predictor) %>%
+  dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+  dplyr::filter(n > 1L)
+```
+
+## ROC y PR
+
+```{r}
+roc_scores <- read_csv('../out/roc_scores.csv')
+pr_scores <- read_csv('../out/pr_scores.csv')
+auc_scores <- read_csv('../out/auc_scores.csv')
+```
+
+area bajo la curva
+```{r}
+auc_scores$AUC <- c("ROC","PR")
+auc_score <- auc_scores %>% 
+  pivot_longer(!AUC,names_to = "Predictor", names_prefix = "que", values_to = "auc_value") %>% 
+  pivot_wider(names_from = AUC,values_from = auc_value) %>% 
+  mutate(
+  Predictor = str_extract(Predictor,"(.+)_",group = 1),
+  Predictor = ifelse(Predictor == 'am','AlphaMissense',Predictor)) %>%
+  arrange(desc(PR))
+auc_score$Predictor
+```
+
+```{r}
+roc_score <- roc_scores %>% mutate(
+  Predictor = str_extract(Predictor,"(.+)_",group = 1),
+  Predictor = ifelse(Predictor == 'am','AlphaMissense',Predictor),
+  Predictor = factor(Predictor, levels = auc_score$Predictor))
+
+pr_score <- pr_scores %>% mutate(Predictor = str_extract(Predictor,"(.+)_",group = 1),
+         Predictor = ifelse(Predictor == 'am','AlphaMissense',Predictor),
+         Predictor = factor(Predictor, levels = auc_score$Predictor))
+```
+
+
+```{r}
+rocplot <- ggplot(roc_score,aes(FPR,TPR,color=Predictor)) + 
+  geom_line() + 
+  geom_abline(slope = 1,intercept = 0,linetype='dashed') +
+  labs("Predictor (AUC)") +
+  scale_colour_discrete(labels=paste0(auc_score$Predictor," (",round(auc_score$ROC,3),")")) +
+  labs(y="True positive rate (TPR)",x="False positive rate (FPR) ") +
+  theme_classic() 
+rocplot
+```
+```{r,fig.width=10,fig.height=6}
+ggsave('../out/rocplot.png',width=10,height=6,dpi=700)
+```
+
+```{r}
+prplot <- ggplot(pr_score,aes(Precision,Recall,color=Predictor)) + 
+  geom_line() +
+  geom_hline(yintercept=0.5,lty='dashed') +
+  scale_colour_discrete(labels=paste0(auc_score$Predictor," (",round(auc_score$PR,3),")")) +
+  theme_classic()
+prplot
+```
+
+```{r,fig.width=10,fig.height=6}
+ggsave('../out/prplot.png',width=10,height=6,dpi=700)
+```
+
+```{r,fig.height=10,fig.width=13}
+library(patchwork)
+multiplot2 <- violin / (rocplot + prplot)
+multiplot2
+```
+```{r}
+# multiplot2 <- gtable_add_grob(multiplot2,list(rectGrob(gp = gpar(fill = "white")),
+#                                 textGrob("Figura1", gp = gpar(fontsize = 10)),
+#                                 t = nrow(multiplot2),l = 1, r = ncol(multiplot2), name = "footer"))
+# grid.newpage()
+# grid.draw(multiplot2)
+```
+
+
+```{r}
+ggsave("../out/multiplot2.png",width=15,height=13,dpi=500)
+```
+
+
+
+```{r,fig.width=15,fig.height=15}
+plot_grid(violin,rocplot,prplot)
+```
+
+```{r}
+ggsave("../out/multiplot.png",width=15,height=13,dpi=500)
+```
+
+### Upset Plot
+
+```{r}
+library(ComplexHeatmap)
+```
+
+```{r}
+upsetdata <- class.wo.vus.data %>% 
+  # select(!Class) %>%
+  filter(AlphaMissense_class != 'ambiguous') %>%
+  mutate(across(everything(),as.integer),
+         across(everything(), ~ ifelse(. > 1,1,0))) 
+upsetdata
+```
+
+
+```{r}
+matrixdata <- data.matrix(upsetdata, rownames.force = NA)
+m1 <- make_comb_mat(matrixdata,mode = 'distinct')
+m1
+```
+
+
+```{r}
+UpSet(m1)
+```
+
+Coincide vs no coincide con Class para todos los pred 
+si coincide (ya sea benigno o no) == 1, else 0
+```{r}
+upsetclassdata <- upsetdata %>% 
+  mutate(across(everything(), ~ ifelse(Class == .,1,0)) ) %>%
+  # mutate(MutPred_class = replace_na(MutPred_class,0)) %>%
+  select(!Class)
+upsetclassdata
+```
+
+
+```{r}
+colnames(upsetclassdata) <- str_extract(colnames(upsetclassdata),"(.+)_",group = 1)
+```
+Variantes bien clasificadas por los distintos predictores
+
+```{r}
+matrixdata <- data.matrix(upsetclassdata, rownames.force = NA)
+m2 <- make_comb_mat(matrixdata,mode = 'distinct')
+UpSet(m2, 
+      pt_size = unit(3,'mm'),
+      comb_col = c("black","brown4", "lightblue", "darkgreen")[comb_degree(m2)],
+      top_annotation = upset_top_annotation(m2, add_numbers = TRUE,height = unit(4,'cm')),
+      right_annotation = upset_right_annotation(m2, add_numbers = TRUE, width = unit(4,'cm')
+                                                ))
+```
+```{r}
+library(RColorBrewer)
+par(mar=c(3,4,2,2))
+# display.brewer.all()
+
+colores <- c('white','brown2','yellow','black')
+# lapply(colores,comb_degree(m2))
+colores[comb_degree(m2)]
+# is.vector(comb_degree(m2))
+```
+
+```{r}
+colores <- c('black','#BF233C','darkgreen','#3B6895')
+# colores <- c('black','black','brown2','black','black')
+# colores <- c(1,2,3,4,5)+9
+plot_upset <- UpSet(m2,
+      pt_size = unit(3,'mm'),
+      top_annotation = HeatmapAnnotation(
+        # degree = as.character(comb_degree(m2)-4),
+                                         "True predictions\nintersection" = anno_barplot(comb_size(m2),
+                                         height = unit(4, "cm"), add_numbers = TRUE,
+                                         border = FALSE,
+                                         gp = gpar(fill = colores[comb_degree(m2)]),
+                                         axis_param = list(side='right')
+                                         ),
+                                         annotation_name_side = "right",
+                                         annotation_name_rot = 0),
+      comb_col = colores[comb_degree(m2)],
+      right_annotation = rowAnnotation("True predictions\nper tool" = anno_barplot(set_size(m2),
+                                         baseline = 0,
+                                         border = FALSE,
+                                         # ylim = c(-200,-400),
+                                         # axis_param = list(
+                                         #   at = c(0,-200, -400),
+                                         #   labels = c(0,200, 400),
+                                         #   labels_rot = 0),
+                                         gp = gpar(fill = "black"),
+                                         add_numbers = TRUE,
+                                         width = unit(4, "cm")
+                                         )
+                                      # set_name = anno_text(set_name(m2), 
+                                      # location = 0.3, 
+                                      # just = "center"
+                                      # width = max_text_width(set_name(m2)) + unit(4, "mm"))
+            ),
+      show_row_names = TRUE)
+draw(plot_upset)         
+```
+```{r}
+comb_degree(m2)+1
+```
+
+
+Ejemplo. La primera columna indica que hay ~200 variantes bien clasificadas por los 4 predictores, la segunda columna indica que hay ~80 variantes bien clasificada por todos menos REVEL, etc...
+La fila indica el número de variantes bien clasificadas por grupo.
+
+En este gráfico se ve que MetaRNN es el que más clasifica correctamente, también se ve que el predictor más cercano a MetaRNN (es decir, aquel con mayor coincidencia en variantes clasificadas correctamente) es AlphaMissense.
+
+```{r}
+library(gridExtra)
+library(grid)
+uplot <- grid.grabExpr(draw(plot_upset))
+```
+
+
+```{r,fig.width=15,fig.height=13}
+# grid.arrange(violin,uplot,rocplot,prplot)
+# p1_dim <- get_dim(uplot)
+p3_dim <- get_dim(rocplot)
+prplot2 <- set_dim(prplot,p3_dim)
+alignplots <- violin + rocplot + prplot + uplot
+multiplot3 <- alignplots + plot_annotation(tag_levels = 'A')
+multiplot3
+```
+```{r}
+ggsave("../out/multiplot3.png",width=19,height=13,dpi=500)
+```
+
+
+
+
